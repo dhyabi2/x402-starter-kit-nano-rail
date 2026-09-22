@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { x402ResourceServer, HTTPFacilitatorClient } from '@x402/core/server';
 import { ExactEvmScheme, registerExactEvmScheme } from '@x402/evm/exact/server';
 import { ExactSvmScheme, registerExactSvmScheme } from '@x402/svm/exact/server';
+import { NanoProvider } from './NanoProvider.js';
 import type {
   PaymentPayload,
   PaymentRequirements,
@@ -355,8 +356,28 @@ export class MerchantExecutor {
   private readonly assetName: string;
   private readonly chainId?: number;
   private resourceServer?: x402ResourceServer;
+  private nanoProvider?: NanoProvider;
 
   constructor(options: MerchantExecutorOptions) {
+    // Nano (XNO) is a distinct rail: no facilitator, no ERC-20, no token
+    // accounts. Route it to the NanoProvider before any EVM/SVM handling.
+    if (options.network === 'nano' || options.network.startsWith('nano:')) {
+      this.legacyNetwork = options.network;
+      this.assetName = 'Nano';
+      // Bare "nano" is normalised to mainnet inside NanoProvider; the network
+      // value advertised in payment requirements is the CAIP-2-like namespace.
+      this.network = options.network === 'nano' ? 'nano:mainnet' : (options.network as Network);
+      this.nanoProvider = new NanoProvider({
+        payToAddress: options.payToAddress,
+        network: options.network,
+        price: options.price,
+        rpcUrl: options.rpcUrl,
+      });
+      this.requirements = this.nanoProvider.buildRequirements() as unknown as PaymentRequirements;
+      this.mode = 'facilitator'; // Nano settles via on-chain block, no gas step
+      return;
+    }
+
     // Convert legacy network name to CAIP-2 format if needed
     // Also resolve CAIP-2 input to legacy name for built-in config lookup
     const legacyKey = CAIP2_TO_LEGACY[options.network] ?? options.network;
@@ -464,6 +485,11 @@ export class MerchantExecutor {
    * Initialize the resource server (async initialization for facilitator mode)
    */
   async initialize(): Promise<void> {
+    // Nano needs no facilitator: the on-chain block is the settlement.
+    if (this.nanoProvider) {
+      console.log('✅ x402 Nano settlement provider initialized (rpc.nano.to)');
+      return;
+    }
     if (this.mode === 'facilitator') {
       const facilitatorClient = new HTTPFacilitatorClient({
         url: this.facilitatorUrl!,
@@ -572,6 +598,9 @@ export class MerchantExecutor {
   }
 
   createPaymentRequiredResponse() {
+    if (this.nanoProvider) {
+      return this.nanoProvider.createPaymentRequiredResponse();
+    }
     return {
       x402Version: 2,
       accepts: [this.requirements],
@@ -587,9 +616,30 @@ export class MerchantExecutor {
     console.log('\n🔍 Verifying payment...');
     console.log(`   Network: ${(payload as any).accepted?.network || this.network}`);
     console.log(`   Scheme: ${(payload as any).accepted?.scheme || 'exact'}`);
-    console.log(`   From: ${(payload.payload as any).authorization?.from}`);
+    console.log(`   From: ${(payload as any).payload?.authorization?.from}`);
     console.log(`   To: ${this.requirements.payTo}`);
     console.log(`   Amount: ${this.requirements.amount}`);
+
+    // Nano: verification is confirming the exact-amount block reached our
+    // address on the Nano network. No facilitator.
+    if (this.nanoProvider) {
+      const expectedAmount = (this.requirements as any).amount;
+      const result = await this.nanoProvider.confirmPayment(expectedAmount);
+      const mapped: VerifyResult = {
+        isValid: result.isValid,
+        payer: result.payer,
+        invalidReason: result.invalidReason,
+      };
+      console.log('\n📋 Verification result:');
+      console.log(`   Valid: ${mapped.isValid}`);
+      if (result.blockHash) {
+        console.log(`   Block: ${result.blockHash}`);
+      }
+      if (!mapped.isValid) {
+        console.log(`   ❌ Reason: ${mapped.invalidReason}`);
+      }
+      return mapped;
+    }
 
     try {
       const result =
@@ -624,6 +674,35 @@ export class MerchantExecutor {
     console.log(`   Network: ${this.network}`);
     console.log(`   Amount: ${this.requirements.amount} (micro units)`);
     console.log(`   Pay to: ${this.requirements.payTo}`);
+
+    // Nano: the confirmed block already moved the funds, so settlement is the
+    // same confirm check — nothing extra to submit and no gas to pay.
+    if (this.nanoProvider) {
+      const expectedAmount = (this.requirements as any).amount;
+      const result = await this.nanoProvider.settle(expectedAmount);
+      console.log('\n✅ Payment settlement result:');
+      console.log(`   Success: ${result.success}`);
+      console.log(`   Network: ${result.network}`);
+      if (result.transaction) {
+        console.log(`   Block: ${result.transaction}`);
+        console.log(
+          `   Explorer: https://nanexplorer.com/nano/block/${result.transaction}`
+        );
+      }
+      if (result.payer) {
+        console.log(`   Payer: ${result.payer}`);
+      }
+      if (result.errorReason) {
+        console.log(`   Error: ${result.errorReason}`);
+      }
+      return {
+        success: result.success,
+        transaction: result.transaction,
+        network: result.network,
+        payer: result.payer,
+        errorReason: result.errorReason,
+      };
+    }
 
     try {
       const result =

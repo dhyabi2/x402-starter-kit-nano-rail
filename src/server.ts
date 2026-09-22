@@ -72,6 +72,9 @@ const SUPPORTED_NETWORKS: string[] = [
   'peaq',
   'solana',
   'solana-devnet',
+  // Nano (XNO) — feeless, instant, no facilitator
+  'nano',
+  'nano:nano-test-network',
   // CAIP-2 format (eip155:chainId)
   'eip155:8453',      // Base
   'eip155:84532',     // Base Sepolia
@@ -118,7 +121,11 @@ if (!isValidNetwork) {
 }
 
 let settlementMode: 'facilitator' | 'direct';
-if (SETTLEMENT_MODE_ENV === 'local' || SETTLEMENT_MODE_ENV === 'direct') {
+const isNanoNetwork = NETWORK === 'nano' || NETWORK.startsWith('nano:');
+if (isNanoNetwork) {
+  // Nano settles on-chain via the block; no facilitator or private key needed.
+  settlementMode = 'facilitator';
+} else if (SETTLEMENT_MODE_ENV === 'local' || SETTLEMENT_MODE_ENV === 'direct') {
   settlementMode = 'direct';
 } else if (SETTLEMENT_MODE_ENV === 'facilitator') {
   settlementMode = 'facilitator';
@@ -180,7 +187,10 @@ async function initializeMerchant() {
   await merchantExecutor.initialize();
 }
 
-if (settlementMode === 'direct') {
+if (isNanoNetwork) {
+  console.log('⚡ Nano (XNO) settlement: on-chain block check (no facilitator needed)');
+  console.log('   Payable to: ' + PAY_TO_ADDRESS);
+} else if (settlementMode === 'direct') {
   console.log('🧩 Using local settlement (direct EIP-3009 via RPC)');
   if (RPC_URL) {
     console.log(`🔌 RPC endpoint: ${RPC_URL}`);

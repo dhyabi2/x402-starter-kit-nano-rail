@@ -2,15 +2,15 @@
 
 # x402 Starter Kit
 
-A starter kit for building paid APIs using the x402 v2 payment protocol with support for both EVM and Solana networks.
+A starter kit for building paid APIs using the x402 v2 payment protocol with support for EVM, Solana and Nano (XNO) networks.
 
 ## Overview
 
 This starter kit demonstrates how to build paid APIs using x402 v2. It:
 
 1. Receives API requests
-2. Requires payment (in this example of $0.10 USDC) before processing
-3. Verifies and settles payments through a facilitator (default: [https://x402.org/facilitator](https://docs.cdp.coinbase.com/x402/network-support#x402-org-facilitator) for testnets, or your own local facilitator for mainnets)
+2. Requires payment (in this example of $0.10 USDC, or 0.1 XNO) before processing
+3. Verifies and settles payments through a facilitator (default: [https://x402.org/facilitator](https://docs.cdp.coinbase.com/x402/network-support#x402-org-facilitator) for testnets, or your own local facilitator for mainnets) — or, for Nano, by confirming the exact-amount block on the Nano network (no facilitator needed)
 4. Processes requests (using OpenAI/EigenAI as configurable examples)
 5. Returns responses after payment is confirmed
 
@@ -19,7 +19,7 @@ This starter kit demonstrates how to build paid APIs using x402 v2. It:
 The API consists of four main components:
 
 - **ExampleService**: Example service logic that processes requests using OpenAI or EigenAI (replace with your own service implementation)
-- **MerchantExecutor**: Handles payment requirements, verification, and settlement (supports both EVM and Solana)
+- **MerchantExecutor**: Handles payment requirements, verification, and settlement (supports EVM, Solana and Nano)
 - **Server**: Express HTTP server that orchestrates payment validation and request processing
 - **Facilitator** (optional): Facilitator server for mainnet support or custom networks
 
@@ -180,6 +180,7 @@ npm run test:solana
 | `npm run build` | Build TypeScript |
 | `npm run test` | Run EVM test client |
 | `npm run test:solana` | Run Solana test client |
+| `npm run test:nano` | Run Nano offline unit test (amount math + requirement shape) |
 | `npm run setup:solana` | Setup Solana wallets (create ATAs) |
 | `npm run clean` | Remove build artifacts |
 
@@ -244,6 +245,24 @@ npm run test:solana
 | Polygon | `polygon` | ✅ | ✅ |
 | Avalanche | `avalanche` | ✅ | ✅ |
 | Solana | `solana` | ✅ | ❌ |
+
+### Nano (XNO) — No Facilitator Required
+
+Nano (XNO) is unique among x402 rails: it has **no gas, no smart contracts, no token accounts and no facilitator**. A Nano payment is a confirmed block on the Nano network — verification **is** settlement. The merchant only needs a receive-only `nano_` address (no private key), and the buyer only needs a Nano wallet with a balance.
+
+| Network | Config Value | How Settlement Works |
+|---------|-------------|---------------------|
+| Mainnet | `nano` or `nano:mainnet` | Server confirms exact-amount block via Nano RPC |
+| Test Network | `nano:nano-test-network` | Same flow on test infrastructure |
+
+**To try Nano:**
+
+```bash
+npm run build
+PAY_TO_ADDRESS=nano_YourNanoAddress NETWORK=nano node dist/server.js
+# Then verify the offline test passes:
+npm run test:nano
+```
 
 ## Usage
 
@@ -324,9 +343,11 @@ x402-starter/
 │   ├── server.ts              # Express server and endpoints
 │   ├── ExampleService.ts      # Example AI service (replace with your own)
 │   ├── MerchantExecutor.ts    # Payment verification & settlement
+│   ├── NanoProvider.ts        # Nano (XNO) settlement provider
 │   ├── facilitator.ts         # Local facilitator server
 │   ├── testClient.ts          # EVM test client
 │   ├── testClientSolana.ts    # Solana test client
+│   ├── testClientNano.ts      # Nano offline test client
 │   ├── setupSolanaWallets.ts   # Solana wallet setup tool
 │   └── x402Types.ts           # Shared types
 ├── env.example                # Example environment configuration
