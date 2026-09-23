@@ -83,12 +83,13 @@ assert('accepts is an array', Array.isArray(resp.accepts));
 assertEqual('accepts has one entry', resp.accepts.length, 1);
 assertEqual('respondent accepts network', resp.accepts[0].network, 'nano:mainnet');
 
-// 10. confirmPayment without a fetch returns invalid
-const offlineCheck = await provider.confirmPayment(xnoToRaw(0.1));
-assert('offline confirm returns not-valid', offlineCheck.isValid === false);
+// 10. confirmPayment with an invalid block hash returns invalid
+const offlineCheck = await provider.confirmPayment('', 'test-req-1');
+assert('offline confirm with empty hash returns not-valid', offlineCheck.isValid === false);
+assertEqual('reason mentions hash format', (offlineCheck.invalidReason || '').includes('hash format'), true);
 
-// 11. settle without a fetch returns failure
-const offlineSettle = await provider.settle(xnoToRaw(0.1));
+// 11. settle without a prior verification returns failure
+const offlineSettle = await provider.settle('never-verified-req');
 assertEqual('offline settle returns failure', offlineSettle.success, false);
 
 // 12. Test network

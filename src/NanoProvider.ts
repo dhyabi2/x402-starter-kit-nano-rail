@@ -44,23 +44,142 @@ const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 const NANO_NETWORKS = ['nano:mainnet', 'nano:nano-test-network'] as const;
 export type NanoNetwork = (typeof NANO_NETWORKS)[number];
 
+// Nano address regex: nano_ or xrb_ prefix, 52 char public key + _ + 8 char checksum.
+// Uses the Nano alphabet (no 0,1,l,o — base-32 variant).
+const NANO_ADDR_RE = /^(nano_|xrb_)[13][13-9a-km-uw-z]{51,59}$/;
+
+// Base-32 alphabet for Nano addresses (RFC 4648 without padding, 0/o/l removed).
+const NANO_B32_ALPHABET = '13456789abcdefghijkmnopqrstuwxyz';
+
+/**
+ * Decode a Nano base-32 string (without prefix/checksum) into a byte array.
+ */
+function nanoB32Decode(s: string): Uint8Array {
+  const bits: number[] = [];
+  for (const ch of s) {
+    const val = NANO_B32_ALPHABET.indexOf(ch);
+    if (val < 0) throw new Error(`Invalid base-32 character: ${ch}`);
+    // push 5 bits
+    bits.push((val >> 4) & 1, (val >> 3) & 1, (val >> 2) & 1, (val >> 1) & 1, val & 1);
+  }
+  // pad to full byte
+  while (bits.length % 8 !== 0) bits.push(0);
+  const bytes = new Uint8Array(bits.length / 8);
+  for (let i = 0; i < bytes.length; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i * 8 + j];
+    bytes[i] = b;
+  }
+  return bytes;
+}
+
+/**
+ * Validate a Nano (or Rai) address by its 8-character Blake2b checksum.
+ * Accepts nano_ and xrb_ prefixes; returns true for valid addresses.
+ */
+function isValidNanoAddress(address: string): boolean {
+  if (!NANO_ADDR_RE.test(address)) return false;
+  try {
+    // Nano blake2b is digest length 5 bytes (40 bits = 8 base-32 chars).
+    // We verify using the Nano node's format: the last 8 chars before the
+    // prefix are the checksum over the account part.
+    const prefix = address.startsWith('nano_') ? 'nano_' : 'xrb_';
+    const rest = address.slice(prefix.length);
+    const accountB32 = rest.slice(0, -8);
+    const checksumB32 = rest.slice(-8);
+
+    // The Nano checksum is blake2b (5 bytes = 40 bits) of the decoded
+    // account bytes. We encode the expected checksum in base-32 and compare.
+    // Use Node.js crypto (no external dependency).
+    const crypto = require('crypto');
+    const accountBytes = nanoB32Decode(accountB32);
+    const hash = crypto.createHash('blake2b', { digestLength: 5 });
+    hash.update(accountBytes);
+    const expectedChecksum = hash.digest();
+
+    // Encode the 5 bytes back to 8 base-32 chars.
+    const bits: number[] = [];
+    for (const b of expectedChecksum) {
+      bits.push((b >> 4) & 1, (b >> 3) & 1, (b >> 2) & 1, (b >> 1) & 1, b & 1,
+                (b >> 7) & 1, (b >> 6) & 1, (b >> 5) & 1);
+    }
+    let computed = '';
+    for (let i = 0; i < bits.length; i += 5) {
+      if (i + 5 > bits.length) break;
+      let val = 0;
+      for (let j = 0; j < 5; j++) val = (val << 1) | (bits[i + j] ?? 0);
+      computed += NANO_B32_ALPHABET[val];
+    }
+    // The Nano checksum uses a reversed string compared to the address format.
+    const expected = computed.split('').reverse().join('');
+    return expected === checksumB32;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Convert a decimal XNO amount (e.g. 0.001) into integer raw units (1e27).
- * Preserves the 30-decimal denomination used across Nano tooling. Uses the
- * shortest round-trip decimal of the number (String(x)) then scales by 1e30
- * with exact integer digit arithmetic, so 0.1 -> 1e29 raw exactly.
+ * Accepts a number or decimal string to avoid exponent-notation issues with
+ * very small values. Parses whole and fractional digits directly, with at
+ * most 30 fractional digits. Rejects values that cannot be represented
+ * exactly in raw units.
  */
-export function xnoToRaw(xno: number): string {
-  if (!Number.isFinite(xno) || xno < 0) {
+export function xnoToRaw(xno: number | string): string {
+  const str = typeof xno === 'number' ? String(xno) : xno;
+
+  // Expand scientific notation: "1e-7" -> "0.0000001"
+  const expMatch = str.match(/^(-?\d+(?:\.\d+)?)[eE]\s*([+-]?\d+)$/);
+  if (expMatch) {
+    const [_, mantissa, exponent] = expMatch;
+    const exp = parseInt(exponent, 10);
+    const [whole = '0', frac = ''] = mantissa.split('.');
+    const digits = whole.replace('-', '') + frac;
+    const pointPos = (whole.startsWith('-') ? whole.length - 1 : whole.length);
+    const targetPos = pointPos + exp;
+    let expanded: string;
+    if (targetPos <= 0) {
+      expanded = '0.' + '0'.repeat(-targetPos) + digits;
+    } else if (targetPos >= digits.length) {
+      expanded = digits + '0'.repeat(targetPos - digits.length);
+    } else {
+      expanded = digits.slice(0, targetPos) + '.' + digits.slice(targetPos);
+    }
+    // Recurse with the expanded form
+    return xnoToRaw(expanded);
+  }
+
+  if (str === '0' || str === '0.0') return '0';
+
+  // Reject non-numeric
+  if (!/^-?\d+(?:\.\d+)?$/.test(str.replace(/^0+(?=\d)/, ''))) {
     throw new Error(`Invalid Nano amount: ${xno}`);
   }
-  if (xno === 0) return '0';
 
-  const str = String(xno); // shortest round-trip decimal, no exponent for < 1e21
-  const [whole = '0', frac = ''] = str.split('.');
-  const intPart = whole.replace(/^0+(?=\d)/, '') || '0';
-  const scaled = intPart + frac.padEnd(30, '0');
-  return scaled.replace(/^0+(?=\d)/, '') || '0';
+  const negative = str.startsWith('-');
+  const absStr = negative ? str.slice(1) : str;
+
+  let [whole = '0', frac = ''] = absStr.split('.');
+
+  // Validate fraction length (max 30 decimal places)
+  if (frac.length > 30) {
+    throw new Error(
+      `Nano amount has ${frac.length} decimal places; maximum is 30: ${xno}`
+    );
+  }
+
+  // Strip leading zeros from whole part
+  whole = whole.replace(/^0+(?=\d)/, '') || '0';
+
+  // Pad fraction to 30 digits
+  const scaled = whole + frac.padEnd(30, '0');
+  const result = scaled.replace(/^0+(?=\d)/, '') || '0';
+
+  if (negative) {
+    throw new Error(`Negative Nano amount: ${xno}`);
+  }
+
+  return result;
 }
 
 /**
@@ -71,17 +190,13 @@ export function rawToXno(raw: string | bigint): number {
 }
 
 function isNanoPayTo(address: string): boolean {
-  return (
-    (address.startsWith('nano_') || address.startsWith('xrb_')) &&
-    address.includes('_') &&
-    address.split('_').pop()!.length >= 60
-  );
+  return isValidNanoAddress(address);
 }
 
 export interface NanoProviderOptions {
   payToAddress: string;
   network: string; // 'nano:mainnet' | 'nano:nano-test-network' | 'nano'
-  price: number; // in XNO
+  price: number | string; // in XNO (string avoids exponent-notation loss)
   rpcUrl?: string; // default rpc.nano.to
   fetchFn?: typeof fetch; // injectable for testing
 }
@@ -92,18 +207,26 @@ export interface NanoProviderOptions {
  * Cost model: the buyer sends raw XNO to a receive-only nano_ address; the
  * block confirming that transfer is the settlement, so verify and settle are
  * the same check with no facilitator and no second on-chain step.
+ *
+ * IMPORTANT — verification accepts a submitted block hash from the buyer
+ * and confirms it via block_info. It does NOT read the merchant's
+ * account_history (which will be empty for a receive-only address). Each
+ * payment is tied to a unique x402 request ID stored in a used-set to
+ * prevent replay.
  */
 export class NanoProvider {
   private readonly payTo: string;
   private readonly network: NanoNetwork;
-  private readonly priceXno: number;
+  private readonly priceRaw: string;
   private readonly rpcUrl: string;
   private readonly fetchFn: typeof fetch;
+  // Track used payment block hashes per request ID to prevent replay.
+  private readonly usedPayments: Map<string, { blockHash: string; payer?: string }> = new Map();
 
   constructor(options: NanoProviderOptions) {
     if (!isNanoPayTo(options.payToAddress)) {
       throw new Error(
-        `payToAddress must be a nano_ (or xrb_) receive address, got: ${options.payToAddress}`
+        `payToAddress must be a valid nano_ (or xrb_) address, got: ${options.payToAddress}`
       );
     }
     this.payTo = options.payToAddress;
@@ -118,7 +241,7 @@ export class NanoProvider {
       );
     }
     this.network = normalized as NanoNetwork;
-    this.priceXno = options.price;
+    this.priceRaw = xnoToRaw(options.price);
     this.rpcUrl = options.rpcUrl || 'https://rpc.nano.to';
     this.fetchFn = options.fetchFn || fetch;
   }
@@ -128,7 +251,7 @@ export class NanoProvider {
     return {
       scheme: 'exact',
       network: this.network,
-      amount: xnoToRaw(this.priceXno),
+      amount: this.priceRaw,
       asset: 'XNO',
       payTo: this.payTo,
       maxTimeoutSeconds: DEFAULT_MAX_TIMEOUT_SECONDS,
@@ -166,57 +289,93 @@ export class NanoProvider {
   }
 
   /**
-   * Confirm that a paid Nano block with the exact required amount reached the
-   * merchant address. The confirmation is the settlement, so this doubles as
-   * the settle check.
+   * Verify a Nano payment by confirming the buyer-submitted send-block hash
+   * via block_info. Does NOT depend on the merchant having a receive block
+   * (a receive-only merchant never publishes one — the send block on Nano's
+   * ledger is the settlement and the receipt).
+   *
+   * @param submittedBlockHash - The block hash the buyer claims paid us.
+   * @param requestId - Unique request ID to detect replay attacks.
    */
   async confirmPayment(
-    expectedAmountRaw: string
+    submittedBlockHash: string,
+    requestId: string
   ): Promise<NanoVerifyResult> {
+    // --- Replay protection ---
+    // Check that this block hash has not been used for a different request.
+    for (const [rid, payment] of this.usedPayments) {
+      if (payment.blockHash === submittedBlockHash && rid !== requestId) {
+        return {
+          isValid: false,
+          invalidReason: 'Payment block hash already used for a different request',
+        };
+      }
+    }
+    // Check that this request ID hasn't already been paid.
+    if (this.usedPayments.has(requestId)) {
+      return {
+        isValid: false,
+        invalidReason: 'Request ID already has a confirmed payment',
+      };
+    }
+
+    if (typeof submittedBlockHash !== 'string' || !/^[0-9A-Fa-f]{64}$/.test(submittedBlockHash)) {
+      return {
+        isValid: false,
+        invalidReason: 'Invalid block hash format — must be a 64-char hex string',
+      };
+    }
+
     try {
-      const history = await this.rpc('account_history', {
-        account: this.payTo,
-        count: '20',
-        raw: 'false',
+      const blockData = await this.rpc('block_info', {
+        hash: submittedBlockHash,
       });
 
-      const blocks = Array.isArray(history?.history) ? history.history : [];
-      if (blocks.length === 0) {
+      // block_info must return a confirmed block
+      if (!blockData || blockData.error) {
         return {
           isValid: false,
-          invalidReason: 'No Nano blocks found for the merchant account',
+          invalidReason: blockData?.error || 'Block not found on the Nano network',
         };
       }
 
-      // account_history returns confirmed blocks in newest-first order. Look
-      // for a receive block matching the exact amount we asked for.
-      const requiredBig = BigInt(expectedAmountRaw);
-      const matched = blocks.find((b: any) => {
-        if (!b || b.type !== 'receive') return false;
-        // Incoming amounts are the raw value in the "amount" field.
-        const amount = BigInt(b.amount || 0);
-        return amount === requiredBig;
-      });
-
-      if (!matched) {
+      // Must be a confirmed send block.
+      if (!blockData.confirmed || blockData.confirmed !== 'true') {
         return {
           isValid: false,
-          invalidReason: `No confirmed Nano receive block of exactly ${expectedAmountRaw} raw found`,
+          invalidReason: 'Block is not confirmed on the Nano network',
+        };
+      }
+      if (blockData.subtype !== 'send') {
+        return {
+          isValid: false,
+          invalidReason: `Block is a ${blockData.subtype} block; expected send`,
         };
       }
 
-      // Ensure the payment was sent to our address.
-      if (matched.account && matched.account !== this.payTo) {
+      // The link_as_account field is the destination nano_ address.
+      if (!blockData.link_as_account || blockData.link_as_account !== this.payTo) {
         return {
           isValid: false,
-          invalidReason: 'Nano block destination does not match merchant address',
+          invalidReason: 'Send block destination does not match merchant address',
         };
       }
+
+      // Fee is structurally zero; amount must match exactly.
+      if (blockData.amount !== this.priceRaw) {
+        return {
+          isValid: false,
+          invalidReason: `Send block amount ${blockData.amount} does not match required ${this.priceRaw}`,
+        };
+      }
+
+      // Record this payment so it cannot be replayed.
+      this.usedPayments.set(requestId, { blockHash: submittedBlockHash, payer: blockData.account });
 
       return {
         isValid: true,
-        payer: matched.source,
-        blockHash: matched.hash,
+        payer: blockData.account, // the sender's nano_ address
+        blockHash: submittedBlockHash,
       };
     } catch (error) {
       return {
@@ -227,22 +386,51 @@ export class NanoProvider {
     }
   }
 
-  /** For Nano the payment is settled the moment the confirmed block exists. */
-  async settle(expectedAmountRaw: string): Promise<NanoSettleResult> {
-    const check = await this.confirmPayment(expectedAmountRaw);
-    if (!check.isValid) {
+  /**
+   * Settle by returning the verification result already proven. For Nano,
+   * settlement is the confirmed send block itself — no second on-chain step
+   * exists. The block hash and payer are preserved from the verify phase.
+   */
+  async settle(requestId: string): Promise<NanoSettleResult> {
+    // The payment was already verified and recorded; settle is purely a
+    // lookup in the used-payments set, not a second RPC call.
+    const payment = this.usedPayments.get(requestId);
+    if (!payment) {
       return {
         success: false,
         network: this.network,
-        errorReason: check.invalidReason,
+        errorReason: 'No verified payment found for this request ID',
       };
     }
-    return {
-      success: true,
-      transaction: check.blockHash,
-      network: this.network,
-      payer: check.payer,
-    };
+    // Verify the block is still confirmed (cemented) — optional but provides
+    // the strongest assurance. A simple confirmation re-check is sufficient.
+    try {
+      const blockData = await this.rpc('block_info', {
+        hash: payment.blockHash,
+      });
+      if (!blockData || blockData.error || blockData.confirmed !== 'true') {
+        return {
+          success: false,
+          network: this.network,
+          errorReason: 'Previously confirmed payment block is no longer confirmed',
+        };
+      }
+      return {
+        success: true,
+        transaction: payment.blockHash,
+        network: this.network,
+        payer: payment.payer,
+      };
+    } catch {
+      // If the RPC fails but we already verified this payment, report success
+      // based on the preserved verification state.
+      return {
+        success: true,
+        transaction: payment.blockHash,
+        network: this.network,
+        payer: payment.payer,
+      };
+    }
   }
 }
 

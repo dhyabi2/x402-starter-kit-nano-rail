@@ -620,11 +620,15 @@ export class MerchantExecutor {
     console.log(`   To: ${this.requirements.payTo}`);
     console.log(`   Amount: ${this.requirements.amount}`);
 
-    // Nano: verification is confirming the exact-amount block reached our
-    // address on the Nano network. No facilitator.
+    // Nano: verification accepts the buyer-submitted block hash from the
+    // payload and confirms it via block_info, tied to a unique request ID
+    // from the payload's authorization data. No facilitator.
     if (this.nanoProvider) {
       const expectedAmount = (this.requirements as any).amount;
-      const result = await this.nanoProvider.confirmPayment(expectedAmount);
+      const payloadAuth = (payload as any).payload?.authorization || {};
+      const submittedBlockHash = payloadAuth.blockHash || payloadAuth.transactionHash || '';
+      const requestId = payloadAuth.from || payloadAuth.nonce || `${Date.now()}-${Math.random()}`;
+      const result = await this.nanoProvider.confirmPayment(submittedBlockHash, requestId);
       const mapped: VerifyResult = {
         isValid: result.isValid,
         payer: result.payer,
