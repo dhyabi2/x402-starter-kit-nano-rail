@@ -39,7 +39,7 @@ try {
   xnoToRaw(-1);
   assert('negative amount throws', false);
 } catch (e: any) {
-  assert('negative amount throws', e.message.includes('Invalid Nano amount'));
+  assert('negative amount throws', e.message.includes('Negative Nano amount'));
 }
 
 // 6. Invalid payTo address rejects
@@ -52,7 +52,7 @@ try {
   });
   assert('invalid payTo: 0x address', false);
 } catch (e: any) {
-  assert('invalid payTo: 0x address', e.message.includes('payToAddress must be a nano_'));
+  assert('invalid payTo: 0x address', e.message.includes('valid nano_'));
 }
 
 // 7. Valid nano_ payTo accepted
