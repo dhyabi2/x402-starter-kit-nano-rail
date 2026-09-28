@@ -1,4 +1,5 @@
 import type { PaymentPayload } from '@x402/core/types';
+import { isValidNanoAddress } from './nanoAddress.js';
 
 // Nano (XNO) is the fee-free, instant rail of the Nano network. Unlike EVM or
 // Solana it has no gas, no token accounts and no facilitator role: a settlement
@@ -43,25 +44,6 @@ const DEFAULT_MAX_TIMEOUT_SECONDS = 600;
 // prefix; this maps a CAIP-2-like network value to a Nano RPC node.
 const NANO_NETWORKS = ['nano:mainnet', 'nano:nano-test-network'] as const;
 export type NanoNetwork = (typeof NANO_NETWORKS)[number];
-
-// Nano address regex: nano_ or xrb_ prefix, 52 char public key + _ + 8 char checksum.
-// Uses the Nano alphabet (no 0,1,l,o — base-32 variant).
-const NANO_ADDR_RE = /^(nano_|xrb_)[13][13-9a-km-uw-z]{51,59}$/;
-
-// Base-32 alphabet for Nano addresses (RFC 4648 without padding, 0/o/l removed).
-
-/**
- * Validate a Nano (or Rai) address. Nano addresses use a specific base-32
- * alphabet (no 0, 1, l, o) and are 64 characters including the prefix and
- * underscore separator. Accepts nano_ and xrb_ prefixes.
- *
- * Full checksum verification requires Blake2b (Node.js crypto) and is
- * available as a secondary check; the regex ensures valid length and
- * alphabet, which prevents misdirected payments.
- */
-function isValidNanoAddress(address: string): boolean {
-  return NANO_ADDR_RE.test(address);
-}
 
 /**
  * Convert a decimal XNO amount (e.g. 0.001) into integer raw units (1e27).

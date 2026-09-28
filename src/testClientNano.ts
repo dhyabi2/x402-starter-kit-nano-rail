@@ -55,9 +55,22 @@ try {
   assert('invalid payTo: 0x address', e.message.includes('valid nano_'));
 }
 
-// 7. Valid nano_ payTo accepted
+// 6b. Well-formed but mistyped address (checksum does not match its key) rejects
+try {
+  new NanoProvider({
+    payToAddress: 'nano_1qno3z1izxpgfgi8d3x3yggd3p97bq3xci3kdh71dfgnokrni3pacjm8od9y',
+    network: 'nano:mainnet',
+    price: 0.1,
+    fetchFn: async () => new Response('{}'),
+  });
+  assert('invalid payTo: bad checksum', false);
+} catch (e: any) {
+  assert('invalid payTo: bad checksum', e.message.includes('valid nano_'));
+}
+
+// 7. Valid nano_ payTo accepted (the well-known all-zero-key address)
 const provider = new NanoProvider({
-  payToAddress: 'nano_1qno3z1izxpgfgi8d3x3yggd3p97bq3xci3kdh71dfgnokrni3pacjm8od9y',
+  payToAddress: 'nano_1111111111111111111111111111111111111111111111111111hifc8npp',
   network: 'nano:mainnet',
   price: 0.1,
   fetchFn: async () => new Response('{}'),
@@ -94,7 +107,7 @@ assertEqual('offline settle returns failure', offlineSettle.success, false);
 
 // 12. Test network
 const testProvider = new NanoProvider({
-  payToAddress: 'nano_1qno3z1izxpgfgi8d3x3yggd3p97bq3xci3kdh71dfgnokrni3pacjm8od9y',
+  payToAddress: 'nano_1111111111111111111111111111111111111111111111111111hifc8npp',
   network: 'nano:nano-test-network',
   price: 0.001,
   fetchFn: async () => new Response('{}'),
